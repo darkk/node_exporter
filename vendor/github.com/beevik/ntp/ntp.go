@@ -11,6 +11,8 @@ package ntp
 
 import (
 	"encoding/binary"
+	"errors"
+	"golang.org/x/net/ipv4"
 	"net"
 	"time"
 )
@@ -28,13 +30,36 @@ const (
 	reservedPrivate
 )
 
+// The LeapIndicator is used to warn if a leap second should be inserted
+// or deleted in the last minute of the current month.
+type LeapIndicator uint8
+
 const (
-	maxStratum = 16
+	// LeapNoWarning indicates no impending leap second
+	LeapNoWarning LeapIndicator = 0
+
+	// LeapAddSecond indicates the last minute of the day has 61 seconds
+	LeapAddSecond = 1
+
+	// LeapDelSecond indicates the last minute of the day has 59 seconds
+	LeapDelSecond = 2
+
+	// LeapNotInSync indicates an unsynchronized leap second.
+	LeapNotInSync = 3
+)
+
+const (
+	// MaxStratum is the largest allowable NTP stratum value
+	MaxStratum = 16
+
 	nanoPerSec = 1000000000
+
+	defaultNtpVersion = 4
 )
 
 var (
-	timeout  = 5 * time.Second
+	defaultTimeout = 5 * time.Second
+
 	ntpEpoch = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
@@ -72,8 +97,9 @@ type ntpTimeShort uint32
 // Duration interprets the fixed-point ntpTimeShort as a number of elapsed
 // seconds and returns the corresponding time.Duration value.
 func (t ntpTimeShort) Duration() time.Duration {
-	sec := (t >> 16) * nanoPerSec
-	frac := (t & 0xffff) * nanoPerSec >> 16
+	t64 := uint64(t)
+	sec := (t64 >> 16) * nanoPerSec
+	frac := (t64 & 0xffff) * nanoPerSec >> 16
 	return time.Duration(sec + frac)
 }
 
@@ -112,8 +138,17 @@ type Response struct {
 	Precision      time.Duration // precision of server's system clock
 	Stratum        uint8         // stratum level of NTP server's clock
 	ReferenceID    uint32        // server's reference ID
+	ReferenceTime  time.Time     // server's time of last clock update
 	RootDelay      time.Duration // server's RTT to the reference clock
 	RootDispersion time.Duration // server's dispersion to the reference clock
+	Leap           LeapIndicator // server's leap second indicator; see RFC 5905
+}
+
+type QOption struct {
+	Timeout time.Duration // defaults to defaultTimeout
+	Version int           // NTP protocol version, defaults to 4
+	Port    int           // NTP Server port for UDPAddr.Port, defaults to 123
+	IpTTL   int           // IP TTL to use for outgoing UDP packets
 }
 
 // Query returns the current time from the remote server host using the
@@ -121,7 +156,11 @@ type Response struct {
 // information about the exchanged time information. The version may be 2, 3,
 // or 4; although 4 is most typically used.
 func Query(host string, version int) (*Response, error) {
-	m, err := getTime(host, version)
+	return QueryEx(host, QOption{Version: version})
+}
+
+func QueryEx(host string, opt QOption) (*Response, error) {
+	m, err := getTime(host, opt)
 	now := toNtpTime(time.Now())
 	if err != nil {
 		return nil, err
@@ -135,22 +174,32 @@ func Query(host string, version int) (*Response, error) {
 		Precision:      toInterval(m.Precision),
 		Stratum:        m.Stratum,
 		ReferenceID:    m.ReferenceID,
+		ReferenceTime:  m.ReferenceTime.Time(),
 		RootDelay:      m.RootDelay.Duration(),
 		RootDispersion: m.RootDispersion.Duration(),
+		Leap:           LeapIndicator((m.LiVnMode >> 6) & 0x03),
 	}
 
 	// https://tools.ietf.org/html/rfc5905#section-7.3
 	if r.Stratum == 0 {
-		r.Stratum = maxStratum
+		r.Stratum = MaxStratum
 	}
 
 	return r, nil
 }
 
 // getTime returns the "receive time" from the remote NTP server host.
-func getTime(host string, version int) (*msg, error) {
-	if version < 2 || version > 4 {
+func getTime(host string, opt QOption) (*msg, error) {
+	if opt.Version == 0 {
+		opt.Version = defaultNtpVersion
+	}
+
+	if opt.Version < 2 || opt.Version > 4 {
 		panic("ntp: invalid version number")
+	}
+
+	if opt.Timeout == 0 {
+		opt.Timeout = defaultTimeout
 	}
 
 	raddr, err := net.ResolveUDPAddr("udp", host+":123")
@@ -158,17 +207,31 @@ func getTime(host string, version int) (*msg, error) {
 		return nil, err
 	}
 
+	if opt.Port != 0 {
+		raddr.Port = opt.Port
+	}
+
 	con, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
 		return nil, err
 	}
 	defer con.Close()
-	con.SetDeadline(time.Now().Add(timeout))
+
+	if opt.IpTTL != 0 {
+		ipcon := ipv4.NewConn(con)
+		err = ipcon.SetTTL(opt.IpTTL)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	con.SetDeadline(time.Now().Add(opt.Timeout))
 
 	m := new(msg)
 	m.setMode(client)
-	m.setVersion(version)
-	m.TransmitTime = toNtpTime(time.Now())
+	m.setVersion(opt.Version)
+	xmt := toNtpTime(time.Now())
+	m.TransmitTime = xmt
 
 	err = binary.Write(con, binary.BigEndian, m)
 	if err != nil {
@@ -180,6 +243,18 @@ func getTime(host string, version int) (*msg, error) {
 		return nil, err
 	}
 
+	// It's possible to use random uint64 as client's `TransmitTime` field,
+	// it has better privacy (clock of the node is not disclosed in
+	// plain-text), better UDP packet spoofing resistance (blind attacker
+	// has to guess both port and the uint64 value), and OpenNTPD behaves
+	// like that. But math/rand is not secure enough for the purpose,
+	// crypto/rand takes 64 bits of entropy for every outgoing packet and
+	// CSPRNG from crypto/rand/rand_unix is not available: see
+	// https://github.com/golang/go/issues/13820
+	if m.OriginTime != xmt {
+		return nil, errors.New("response OriginTime != query TransmitTime") // spoofed packet?
+	}
+
 	return m, nil
 }
 
@@ -187,7 +262,11 @@ func getTime(host string, version int) (*msg, error) {
 // requested version of the NTP protocol. The version may be 2, 3, or 4;
 // although 4 is most typically used.
 func TimeV(host string, version int) (time.Time, error) {
-	m, err := getTime(host, version)
+	return TimeEx(host, QOption{Version: version})
+}
+
+func TimeEx(host string, opt QOption) (time.Time, error) {
+	m, err := getTime(host, opt)
 	if err != nil {
 		return time.Now(), err
 	}
@@ -197,7 +276,7 @@ func TimeV(host string, version int) (time.Time, error) {
 // Time returns the current time from the remote server host using version 4
 // of the NTP protocol.
 func Time(host string) (time.Time, error) {
-	return TimeV(host, 4)
+	return TimeEx(host, QOption{})
 }
 
 func rtt(t1, t2, t3, t4 ntpTime) time.Duration {
