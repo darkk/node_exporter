@@ -156,7 +156,8 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 	// => T2 - T1 = RTT/2 + Offset && T4 - T3 = RTT/2 - Offset
 	// If system wall-clock is synced to NTP-clock then T2 >= T1 && T4 >= T3.
 	// This check is required for chrony as it starts relaying sane NTP
-	// clock before system wall-clock is actually adjusted.
+	// clock before system wall-clock is actually adjusted.  Negative value
+	// in t21 or t43 represents error in time ordering.
 	t21 := resp.RTT/2 + resp.ClockOffset
 	t43 := resp.RTT/2 - resp.ClockOffset
 
@@ -166,14 +167,14 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 	// Negative offset tolerance is used for code readability, perfect t21
 	// and t43 should be non-negative, code tolerates "small negative" values.
 	h24 := 24 * time.Hour
-	offset_margin := -1 * *ntpOffsetTolerance
+	err_margin := -1 * *ntpOffsetTolerance
 	if resp.Leap == ntp.LeapAddSecond || resp.Leap == ntp.LeapDelSecond {
 		// state of leapMidnight is cached as leap flag is dropped right after midnight
 		leapMidnight = resp.Time.Truncate(h24).Add(h24)
 	}
 	if leapMidnight.Add(-h24).Before(resp.Time) && resp.Time.Before(leapMidnight.Add(h24)) {
 		// tolerate leap smearing
-		offset_margin -= time.Second
+		err_margin -= time.Second
 	}
 
 	ch <- c.stratum.mustNewConstMetric(float64(resp.Stratum))
@@ -200,8 +201,8 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 		lambda <= maxDispersion*time.Second && // from packet()
 		root_delay <= *ntpMaxDistance && // from fit()
 		0 <= resp.RTT && // ensuring that clock tick forward
-		offset_margin <= t21 &&
-		offset_margin <= t43 {
+		err_margin <= t21 &&
+		err_margin <= t43 {
 		sanity = 1.
 	}
 	ch <- c.sanity.mustNewConstMetric(sanity)
