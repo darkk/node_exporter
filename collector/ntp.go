@@ -157,13 +157,12 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 	// If system wall-clock is synced to NTP-clock then T2 >= T1 && T4 >= T3.
 	// This check is required for chrony as it starts relaying sane NTP
 	// clock before system wall-clock is actually adjusted.
-	//
-	// ntpOffsetTolerance is added to avoid warning on following chrony
-	// state that is _practically_ sane: RTT = 0.000174662,
-	// ClockOffset = -0.000261665, Self-reported Offset = -0.000215618
 	t21 := resp.RTT/2 + resp.ClockOffset
 	t43 := resp.RTT/2 - resp.ClockOffset
 
+	// ntpOffsetTolerance is added to avoid warning on following chrony
+	// state that is _practically_ sane: RTT = 0.000174662,
+	// ClockOffset = -0.000261665, Self-reported Offset = -0.000215618
 	// Negative offset tolerance is used for code readability, perfect t21
 	// and t43 should be non-negative, code tolerates "small negative" values.
 	h24 := 24 * time.Hour
