@@ -32,7 +32,7 @@ exec | Exposes execution statistics. | Dragonfly, FreeBSD
 filefd | Exposes file descriptor statistics from `/proc/sys/fs/file-nr`. | Linux
 filesystem | Exposes filesystem statistics, such as disk space used. | Darwin, Dragonfly, FreeBSD, Linux, OpenBSD
 hwmon | Expose hardware monitoring and sensor data from `/sys/class/hwmon/`. | Linux
-infiniband | Exposes network statistics specific to InfiniBand configurations. | Linux
+infiniband | Exposes network statistics specific to InfiniBand and Intel OmniPath configurations. | Linux
 ipvs | Exposes IPVS status from `/proc/net/ip_vs` and stats from `/proc/net/ip_vs_stats`. | Linux
 loadavg | Exposes load average. | Darwin, Dragonfly, FreeBSD, Linux, NetBSD, OpenBSD, Solaris
 mdadm | Exposes statistics about devices in `/proc/mdstat` (does nothing if no `/proc/mdstat` present). | Linux
@@ -135,9 +135,9 @@ docker run -d -p 9100:9100 \
   -v "/:/rootfs:ro" \
   --net="host" \
   quay.io/prometheus/node-exporter \
-    -collector.procfs /host/proc \
-    -collector.sysfs /host/sys \
-    -collector.filesystem.ignored-mount-points "^/(sys|proc|dev|host|etc)($|/)"
+    --collector.procfs /host/proc \
+    --collector.sysfs /host/sys \
+    --collector.filesystem.ignored-mount-points "^/(sys|proc|dev|host|etc)($|/)"
 ```
 
 Be aware though that the mountpoint label in various metrics will now have
