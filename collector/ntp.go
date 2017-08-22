@@ -197,7 +197,7 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 	if resp.Leap != ntp.LeapNotInSync &&
 		0 < resp.Stratum && resp.Stratum < ntp.MaxStratum &&
 		0 <= freshness && // from packet()
-		freshness <= (1 << maxPoll)*time.Second && // FYI: ntpdate uses 24h as a heuristics instead of ~36h derived from MAXPOLL
+		freshness <= (1<<maxPoll)*time.Second && // FYI: ntpdate uses 24h as a heuristics instead of ~36h derived from MAXPOLL
 		lambda <= maxDispersion*time.Second && // from packet()
 		root_delay <= *ntpMaxDistance && // from fit()
 		0 <= resp.RTT && // ensuring that clock tick forward
