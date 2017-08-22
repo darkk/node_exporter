@@ -151,26 +151,30 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 	// but all these values are 0 if only single NTP packet was sent.
 	root_delay := (resp.RTT+resp.RootDelay)/2 + resp.RootDispersion
 
-	// (-1*RTT/2 <= ClockOffset <= RTT/2) is equal to (T1 <= T2 && T3 <= T4).
-	// That's not a true check that clock is in-sync (T1 <= T2 <= T3 <= T4),
-	// but that's good enough as clock usually goes forward, so I assume
-	// that T2 <= T3 and T1 <= T4.  It is used to detect the case when NTP
-	// client wall-clock differs from NTP-clock in the NTP server that is
-	// running on same machine (these two should be quite similar clock).
-	// That's required for chrony as it starts relaying sane NTP clock
-	// before system wall-clock is actually adjusted.
+	// RTT    = (T4 - T1) - (T3 - T2)     =   T4 - T3 + T2 - T1
+	// Offset = (T2 + T3)/2 - (T4 + T1)/2 = (-T4 + T3 + T2 - T1) / 2
+	// => T2 - T1 = RTT/2 + Offset && T4 - T3 = RTT/2 - Offset
+	// If system wall-clock is synced to NTP-clock then T2 >= T1 && T4 >= T3.
+	// This check is required for chrony as it starts relaying sane NTP
+	// clock before system wall-clock is actually adjusted.
 	//
 	// ntpOffsetTolerance is added to avoid warning on following chrony
 	// state that is _practically_ sane: RTT = 0.000174662,
 	// ClockOffset = -0.000261665, Self-reported Offset = -0.000215618
-	offset_margin := resp.RTT/2 + *ntpOffsetTolerance
+	t21 := resp.RTT/2 + resp.ClockOffset
+	t43 := resp.RTT/2 - resp.ClockOffset
+
+	// Negative offset tolerance is used for code readability, perfect t21
+	// and t43 should be non-negative, code tolerates "small negative" values.
+	h24 := 24 * time.Hour
+	offset_margin := -1 * *ntpOffsetTolerance
 	if resp.Leap == ntp.LeapAddSecond || resp.Leap == ntp.LeapDelSecond {
 		// state of leapMidnight is cached as leap flag is dropped right after midnight
-		leapMidnight = resp.Time.Truncate(24 * time.Hour).Add(24 * time.Hour)
+		leapMidnight = resp.Time.Truncate(h24).Add(h24)
 	}
-	if leapMidnight.Add(-24*time.Hour).Before(resp.Time) && resp.Time.Before(leapMidnight.Add(24*time.Hour)) {
+	if leapMidnight.Add(-h24).Before(resp.Time) && resp.Time.Before(leapMidnight.Add(h24)) {
 		// tolerate leap smearing
-		offset_margin += time.Second
+		offset_margin -= time.Second
 	}
 
 	ch <- c.stratum.mustNewConstMetric(float64(resp.Stratum))
@@ -197,7 +201,8 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 		lambda <= maxDispersion*time.Second && // from packet()
 		root_delay <= *ntpMaxDistance && // from fit()
 		0 <= resp.RTT && // ensuring that clock tick forward
-		-1*offset_margin <= resp.ClockOffset && resp.ClockOffset <= offset_margin {
+		offset_margin <= t21 &&
+		offset_margin <= t43 {
 		sanity = 1.
 	}
 	ch <- c.sanity.mustNewConstMetric(sanity)
