@@ -30,7 +30,7 @@ const (
 	phi_us        = 15 // phi is 15e-6 (s)
 	maxPoll       = 17 // log2 max poll interval (~36 h)
 
-	maxDistance = (1500000 + (phi_us * (1 << maxPoll))) * time.Microsecond // 1.5s is MAXDIST from ntp.org, 1.0 is from RFC5905
+	maxDistance = (1500000 + (phi_us * (1 << maxPoll))) * time.Microsecond // 1.5s is MAXDIST from ntp.org, it is 1.0 in RFC5905
 )
 
 var (
@@ -38,7 +38,7 @@ var (
 	ntpServerIsLocal   = flag.Bool("collector.ntp.server-is-local", false, "Certify that collector.ntp.server address is the same local host as this collector.")
 	ntpIpTTL           = flag.Int("collector.ntp.ip-ttl", 1, "IP TTL to use while sending NTP query")
 	ntpProtocolVersion = flag.Int("collector.ntp.protocol-version", 4, "NTP protocol version")
-	ntpMaxDistance     = flag.Duration("collector.ntp.max-distance", maxDistance, "Max accumulated distance to the root")
+	ntpMaxDistance     = flag.Duration("collector.ntp.max-distance", maxDistance, "Max accumulated distance to the root") // is used as-is without phi*(1<<poll)
 	ntpOffsetTolerance = flag.Duration("collector.ntp.local-offset-tolerance", time.Millisecond, "Offset between local clock and local ntpd time to tolerate")
 
 	leapMidnight time.Time
@@ -196,7 +196,7 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 	if resp.Leap != ntp.LeapNotInSync &&
 		0 < resp.Stratum && resp.Stratum < ntp.MaxStratum &&
 		0 <= freshness && // from packet()
-		freshness <= 24*time.Hour && // 24h is heuristics from ntpdate
+		freshness <= (1 << maxPoll)*time.Second && // FYI: ntpdate uses 24h as a heuristics instead of ~36h derived from MAXPOLL
 		lambda <= maxDispersion*time.Second && // from packet()
 		root_delay <= *ntpMaxDistance && // from fit()
 		0 <= resp.RTT && // ensuring that clock tick forward
